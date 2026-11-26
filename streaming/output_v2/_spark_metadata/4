@@ -1,0 +1,10 @@
+v1
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00000-ecd92ea2-1f88-4440-ab01-9c151d721117-c000.snappy.parquet","size":1016,"isDir":false,"modificationTime":1795631076280,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00039-15a74934-703e-492c-8261-7b12d00003cf-c000.snappy.parquet","size":2412,"isDir":false,"modificationTime":1795631077008,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00051-799653dd-a4bf-4656-8d52-92d397dae2f6-c000.snappy.parquet","size":2411,"isDir":false,"modificationTime":1795631077327,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00085-abb237de-d328-440c-86bf-5f809939d8a0-c000.snappy.parquet","size":2411,"isDir":false,"modificationTime":1795631077988,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00087-6e58817f-4a31-4475-a1fc-4e69b9e4350e-c000.snappy.parquet","size":2412,"isDir":false,"modificationTime":1795631078033,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00107-11a7060a-8b3e-4ee5-b5da-51149cacc2d2-c000.snappy.parquet","size":2411,"isDir":false,"modificationTime":1795631078445,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00119-4a92972b-1f20-4929-879c-728184ef1c40-c000.snappy.parquet","size":2412,"isDir":false,"modificationTime":1795631078729,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00141-3f8b0978-a2f4-4f9d-8352-fda362f71ba5-c000.snappy.parquet","size":2412,"isDir":false,"modificationTime":1795631079207,"blockReplication":1,"blockSize":33554432,"action":"add"}
+{"path":"file:///opt/chargepulse/streaming/output_v2/part-00179-3c4aa6cf-c655-49bd-b773-6c3b7c7f2a4c-c000.snappy.parquet","size":2412,"isDir":false,"modificationTime":1795631080083,"blockReplication":1,"blockSize":33554432,"action":"add"}

@@ -1,0 +1,9 @@
+boto3
+kafka-python
+pyspark
+psycopg[binary]
+python-dotenv
+pydantic
+pandas
+pyarrow
+pytest
