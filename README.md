@@ -1,449 +1,288 @@
-ChargePulse ⚡
-
-Lambda Architecture for Real-Time EV Charging Analytics and Cost Reconciliation
-Phase 1 --- Proposed System Design
-
-Submitted by: Laksh Sharma and Kartik Singh
-
-Course: Big Data Analytics with Hadoop and Spark (CS1243)
-
-Submitted to: Deepika Prakash Ma'am
-
-Date: 31 October 2026
-
-📌 Project Overview
-
-
-Problem Statement
-
-Operators of electric-vehicle (EV) charging networks need to understand
-station utilisation and charging expenditure as charging sessions occur.
-Two practical challenges arise:
-
-1. Operators need timely visibility into energy consumption and
-   estimated charging costs so unusual usage or spending can be noticed
-   quickly.
-2. Final station settlement or billing reports may arrive after the
-   charging activity, requiring accurate station-wise and session-wise
-   reconciliation of estimated costs against reported amounts.
-   
-ChargePulse proposes a data engineering pipeline that processes a
-continuous stream of simulated charging activity, retains an immutable
-raw history, and combines fast operational estimates with authoritative
-historical recomputation.
-
-Objectives
-
-- Track charging activity, energy consumption, and estimated costs by
-  charging station, connector, and charging session.
-- Monitor live station consumption and trigger configurable alerts
-  when energy or cost thresholds are crossed.
-- Generate accurate hourly and daily charging summaries by removing
-  duplicate events and incorporating late-arriving settlement records.
-- Reconcile calculated session costs with reported billed energy and
-  settlement amounts.
-- Display current consumption, estimated expenditure, station
-  utilisation, and reconciled historical results on a single
-  dashboard.
-  
-Design Assumptions
-
-- Default input rate: 50 data points per second.
-- Settlement reports may arrive a few seconds after the corresponding
-  charging events.
-- Streaming uses approximately one-second processing windows for
-  operational visibility.
-- Speed-layer output files are written at one-minute intervals.
-- Alerts are expected within a few seconds.
-- At 50 events/second, the generator would emit approximately 4.32
-  million events in 24 hours (50 × 60 × 60 × 24). This is a
-  derived estimate, not a fixed dataset size.
-- Event payload size and S3 archive retention duration will be
-  measured or configured during implementation.
-- Kafka event retention is seven days.
-  
-🏗️ Architecture Design
-
-Why Lambda Architecture?
-
-ChargePulse uses Lambda architecture because it requires two
-different processing behaviours:
-
-- Speed layer: prioritises low-latency estimates for active
-  charging activity.
-- Batch layer: prioritises accurate and repeatable historical
-  results, including late settlement records and corrections.
-  
-A Kappa design would require replaying the event log to apply historical
-corrections. The Lambda design instead maintains an append-only S3
-master archive and recomputes affected hourly batch views.
-
-High-Level Data Flow
-
-1. A Python producer generates charging-session events and station
-   settlement reports.
-2. Records are validated and written to Amazon S3 first.
-3. After a successful S3 write, events are published to Apache
-   Kafka for the speed-processing path.
-4. Spark Structured Streaming consumes Kafka events and produces
-   low-latency energy and estimated-cost aggregates.
-5. PySpark batch processing reads the S3 archive, removes
-   duplicates, joins settlement reports, applies effective-dated tariff
-   rules, and recomputes hourly aggregates.
-6. Processed speed, batch, and metadata results are stored in separate
-   PostgreSQL tables.
-7. A merged SQL view prevents overlap between batch and speed results.
-8. Grafana reads the merged view from PostgreSQL to display live
-   and historical analytics.
-   
-Processing Layers
-  Layer                               Design and Responsibility
-  Batch                           PySpark reads raw S3 data, removes
-duplicate event IDs, joins
-settlement reports by session ID,
-applies effective-dated tariff
-rules, and recomputes hourly
-aggregates. Results are written to
-batch/; processing watermarks are
-stored in meta/.
-
-  Speed                           Spark Structured Streaming consumes
-Kafka, maintains running totals by
-station, and computes approximately
-one-second windows for energy and
-estimated-cost calculations.
-Sliding windows help detect unusual
-consumption or cost spikes. Speed
-outputs are written to speed/
-every minute.
-
-  Serving                         PostgreSQL stores batch, speed, and
-metadata results in separate
-tables. A merged SQL view uses
-batch results for completed periods
-and speed results only for the
-uncovered interval.
-Visualisation                   Grafana reads merged_view through
-its native PostgreSQL data source
-and displays live operational and
-historical analytics.
-Master Archive and Storage Tiers
-PostgreSQL is a derived serving store. Amazon S3 remains the
-append-only master archive and source of truth, allowing the serving
-database to be rebuilt from archived data if required.
-  S3 Prefix                           Contents and Write Behaviour
-  raw/                              Append-only Parquet event files
-partitioned by year, month, day,
-and hour. Minute and second remain
-columns.
-
-  batch/                            Authoritative hourly aggregates.
-The relevant hour is overwritten
-when recomputed.
-
-  speed/                            Approximate streaming aggregates,
-with one output file per minute.
-
-  meta/                             Processing watermarks and the
-latest completed batch boundary,
-stored per station or processing
-key.
-dead-letter/                      Rejected events, stored separately
-and never overwritten.
-
-📥 Data Sources and Event Contract
-
-  Source                  Format / Type           Proposed Columns
-  Charging Session      JSON; semi-structured   event_id,
-Events                                        session_id,
-event_ts,
-station_id,
-connector_id,
-vehicle_id,
-energy_delta_kwh,
-power_kw,
-session_status
-
-  Station Settlement    JSON; semi-structured   report_id,
-Reports                                       session_id,
-billed_energy_kwh,
-billed_amount,
-settlement_status,
-reported_at
-Tariff / Station      CSV; structured and     station_id,
-Policy                effective-dated         tariff_id,
-price_per_kwh,
-service_fee,
-alert_threshold_kwh,
-effective_from,
-effective_to
-
-Key Data Rules
-
-- event_id is the deduplication key.
-- session_id links charging events to their later settlement report.
-- event_ts records when the charging activity occurred, not when the
-  producer or processor received it.
-- Energy consumption is represented numerically in kWh.
-- Estimated cost is derived from the effective-dated tariff table
-  rather than treated as an immutable property of the raw event.
-- A tariff change is applied by recomputing the affected batch period,
-  not by rewriting raw history.
-  
-Validation and Idempotency
-
-Every record is checked against an explicit schema in a shared Python
-module. Invalid records---such as records with a missing event ID,
-negative energy delta, invalid timestamp, unknown station, or malformed
-settlement amount---are routed to dead-letter/ and counted for
-dashboard visibility.
-
-
-Idempotency is enforced in two stages:
-
-1. Deduplication on load: PySpark's dropDuplicates(event_id)
-   removes duplicate charging events within the processed dataset.
-2. Watermarks and partition overwrite: The batch job reads the
-   stored maximum event timestamp from batch metadata, processes newly
-   arrived or re-queued late data, and overwrites the affected hourly
-   partition instead of appending a second copy. The watermark strategy
-   permits controlled recomputation when a late settlement report
-   arrives.
-   
-The producer supports configurable duplicate and late/out-of-order event
-injection so these behaviours can be demonstrated and tested.
-
-🧰 Technology Stack and Justification
-
-  Technology                          Role and Justification
-  Python                          Generates simulated
-charging-session events and
-settlement reports, validates
-records, and coordinates the
-S3-first split-write workflow.
-
-  Apache Kafka                    Provides a durable, ordered event
-log with seven-day retention and
-replay support. It runs in Docker
-Compose, avoiding an external
-broker dependency. Replay supports
-recovery and validation of the
-streaming path.
-
-  PySpark                         Reads the partitioned S3 archive,
-deduplicates events, joins sessions
-to settlement reports, applies
-effective-dated tariffs, checks
-watermarks, and recomputes hourly
-aggregates. Partition overwrite
-makes hourly recomputation
-idempotent.
-
-  Amazon S3 + Parquet             Stores the immutable raw master
-dataset and derived batch, speed,
-metadata, and dead-letter data.
-Parquet supports analytical scans.
-Raw data is partitioned by
-year/month/day/hour.
-
-  Spark Structured Streaming      Consumes Kafka and maintains
-running station-level energy and
-estimated-cost totals.
-Approximately one-second event-time
-windows provide low-latency
-estimates; sliding windows detect
-sustained spikes. Checkpointing
-supports recovery after restarts.
-
-  PostgreSQL                      Stores compact, pre-aggregated
-batch and speed results in separate
-indexed tables, along with
-batch-boundary metadata. SQL views
-provide Grafana with a low-latency
-serving interface without
-repeatedly scanning raw S3 files.
-
-  Grafana                         Connects to PostgreSQL through its
-native data source and displays
-auto-refreshing time-series charts,
-station comparisons, and alert
-panels. Dashboard definitions will
-be exported as JSON for
-reproducibility.
-Docker Compose                  Runs the self-managed components
-together in a reproducible
-deployment.
-Why PostgreSQL for the Serving Layer?
-The dashboard repeatedly queries compact, pre-aggregated operational and
-historical results. PostgreSQL provides a low-latency SQL interface for
-Grafana and avoids scanning raw S3 files on every dashboard refresh.
-
-PostgreSQL stores derived serving tables, not the source-of-truth
-event history. Separate batch_view, speed_view, and batch_meta
-tables support a merged SQL view that selects authoritative batch
-results for completed periods and speed results only after the last
-completed batch boundary.
-
-✅ Lambda Validation and Correctness
-
-1. Split-Write Fault Tolerance
-The producer writes each event to S3 first and publishes it to Kafka
-only after the S3 write succeeds.
-- If S3 fails, the producer does not publish to Kafka; it retries and
-  records the failure.
-- If S3 succeeds but Kafka publication fails, the event remains safe
-  in the master archive. The producer retries Kafka publication.
-- If Kafka retries are exhausted, the event ID is logged. A
-  reconciliation task compares the producer's per-minute event-ID
-  ledger with S3 records and republishes missing Kafka events.
-This ordering prevents a Kafka-only event from existing without an S3
-master record. The two writes are not an atomic transaction, so
-retries and reconciliation are part of the design.
-2. Batch--Stream Consistency
-Both PySpark jobs import the same transformations module and validate
-against the same event schema contract. Common energy aggregation and
-tariff calculation rules are maintained in one place, so a formula
-change is applied consistently to both processing paths.
-
-Streaming outputs are estimates. Batch outputs are authoritative after
-deduplication and settlement reconciliation.
-3. Serving Strategy and Double-Counting Prevention
-- Batch processing writes authoritative hourly aggregates to batch/
-  and updates the relevant watermark and completed-hour boundary in
-  meta/.
-- Streaming writes minute-level aggregates to speed/ and supplies
-  data only after the last completed batch boundary.
-- Grafana queries merged_view, which selects batch rows for
-  completed hours and speed rows only for the uncovered interval.
-The cutoff timestamp marks the last hour fully processed by batch. The
-batch and speed ranges are disjoint. For example, if the cutoff is
-09:00, batch supplies completed periods before 09:00, while speed
-supplies 09:00 through the current time.
-
-When the 09:00 batch finishes, its output is written first and the
-metadata boundary is advanced second. The next merged-view query then
-uses the batch result for that hour and no longer includes the speed
-result for the same period.
-
-Batch rewrites are safe because duplicate event IDs are removed,
-processing metadata is checked, and only the affected hourly partition
-is overwritten. Re-running an hour replaces its previous aggregate
-instead of appending a duplicate.
-4. Late Data and Reconciliation
-A settlement report may arrive after the streaming window has closed.
-The speed layer does not retroactively revise already emitted windows,
-so its result remains an operational estimate.
-
-The report is retained in raw/ and joined to its charging session by
-session_id during the next batch recomputation of the affected hour.
-The batch result then reflects reported billed energy and settlement
-amount. After recomputation succeeds, batch metadata is updated and the
-merged view switches that period from the older speed estimate to the
-authoritative batch result.
-
-☁️ Infrastructure and Deployment
-
-Proposed Deployment
-- Compute: One Ubuntu EC2 t3.xlarge instance (4 vCPU / 16 GB
-  RAM).
-- Disk: 50 GB gp3 storage, exceeding the guideline's minimum 30
-  GB.
-- Orchestration: All self-managed components run in one Docker
-  Compose project.
-- Cost management: The instance is stopped when not in use to
-  manage AWS Academy Learner Lab credits.
-Services
-  Service                             Role
-  Python producer                     Generates charging-session events
-and settlement reports; validates
-records and performs S3-first split
-writes.
-
-  Apache Kafka                        Durable speed-path event broker
-with seven-day retention.
-
-  Spark Structured Streaming          Continuously processes Kafka events
-and writes speed aggregates.
-
-  PySpark batch scheduler             Runs hourly S3 batch recomputation
-and metadata updates.
-
-  Grafana                             Dashboard and alert visualisation.
-AWS S3 + PostgreSQL                 S3 provides the archive; PostgreSQL
-serves derived aggregates and
-metadata.
-Ports and Network Access
-  Service                                       Port Reachability
-  SSH                                           22 Team public IP /32
-only.
-
-  Grafana                                     3000 Team public IP /32
-only.
-
-  Kafka                                       9092 Internal Docker
-network only; open
-externally only if an
-external producer is
-required.
-
-  Spark UI                                    4040 Internal network or
-SSH tunnel only; do
-not expose publicly.
-PostgreSQL / S3                        HTTPS 443 Outbound AWS service
-access; credentials
-supplied securely.
-AWS Resources and Storage Layout
-The planned AWS resources include one S3 bucket with raw/, batch/,
-speed/, meta/, and dead-letter/ prefixes, plus an EC2 instance
-profile or temporary Learner Lab credentials.
-
-PostgreSQL runs as a Docker Compose service on the EC2 instance and
-stores derived serving aggregates and metadata.
-
-Security and reproducibility practices:
-- Store secrets in an uncommitted .env file or use an instance role;
-  never commit credentials to Git.
-- Pin container images and libraries instead of using latest.
-- Restrict SSH and Grafana inbound rules to the team's public IP as a
-  /32.
-- Do not expose processing UIs, databases, or broker ports to the
-  public internet.
-- Document fresh-instance setup and reproducible deployment in the
-  repository README.
-
-  
-🎯 Expected Outcomes
-
-- A configurable producer capable of generating at least 50 charging
-  data points per second by default, including duplicates and
-  late/out-of-order events.
-- An append-only S3 archive preserving raw charging and settlement
-  records for historical recomputation.
-- A continuously updated speed view for station-level energy
-  consumption and estimated charging costs.
-- An idempotent hourly batch view incorporating deduplication, late
-  settlement reports, and effective-dated tariff rules.
-- A merged PostgreSQL view that prevents double counting across the
-  batch/speed boundary.
-- A Grafana dashboard with live station metrics, estimated
-  expenditure, reconciliation differences, and threshold alerts.
-
-  
-📝 Conclusion
-
-ChargePulse applies Lambda architecture to EV charging analytics while
-retaining the scale and engineering pattern of the reference AI Bill
-Analytics design. Python generates a continuous stream of charging
-activity; Kafka supports the speed path; S3 preserves the append-only
-master history; PySpark provides streaming and batch processing;
-PostgreSQL exposes the serving views; and Grafana presents the results.
-
-The key design feature is the separation between low-latency estimates
-and authoritative historical recomputation, with explicit handling for
-duplicates, late settlement reports, split-write failures, and
-double-counting at the serving boundary.
-
-This document describes the Phase 1 blueprint. Actual event payload
-size, S3 storage growth, and measured throughput will be validated
-during implementation. The fixed default event rate is 50 events per
-second, matching the reference design and project guideline.
+# ChargePulse: Lambda architecture for EV-charging analytics
+
+ChargePulse simulates a network of EV charging stations. It processes the meter events and settlement reports through a **Lambda architecture** (Option A of the course guidelines):
+
+- a **speed layer** (Spark Structured Streaming on Kafka) gives live per-minute energy and cost estimates;
+- a **batch layer** (PySpark on the append-only S3 master dataset) recomputes authoritative hourly results. These include de-duplication, late events and session-level cost reconciliation against settlement reports;
+- a **serving layer** (PostgreSQL) exposes the batch view, the speed view and one merged view with no double counting. **Grafana** reads them live.
+
+Team: **Laksh Sharma, Kartik Singh** (CS1243, Big Data Analytics with Hadoop and Spark).
+
+| Document | Contents |
+|----------|----------|
+| [docs/architecture.md](docs/architecture.md) | Architecture diagram (Mermaid), data flows, storage tiers, ports |
+| [docs/technology-decisions.md](docs/technology-decisions.md) | Technology Decision Record, one section per layer, with Phase 2 changes |
+| This README | Setup on a fresh instance, operations, demo runbook, **Lambda design checklist** |
+| [docs/reflection.md](docs/reflection.md) | What we learned, what changed since Phase 1, what we'd do differently |
+
+```mermaid
+flowchart LR
+    P[producer] -->|1 WAL fsync| W[(local WAL)]
+    P -->|2 publish| K[[Kafka 7d]]
+    W -->|3 Parquet / min| S3[(S3 raw/ dt=/hr=)]
+    K --> SL[speed layer<br/>1-min windows]
+    S3 --> BL[batch layer<br/>hourly, idempotent]
+    SL -->|upsert| PG[(PostgreSQL<br/>speed_view · batch_view<br/>merged_view)]
+    BL -->|replace hour + boundary| PG
+    PG --> G[Grafana :3000]
+```
+
+---
+
+## Repository layout
+
+```
+docker-compose.yml          one Compose project: kafka, kafka-init, producer, speed-layer,
+                            batch-scheduler, postgres, grafana (+ minio: local-s3 profile)
+.env.example                every setting; copy to .env (git-ignored)
+chargepulse_common/         SHARED by all layers
+  contract.py               event/settlement schema + validation rules, topic & S3 layout
+  tariffs.py                effective-dated tariff loader + cost formula
+  transforms.py             Spark transforms used by BOTH speed and batch layers
+  db.py                     Postgres connection from env
+config/tariffs.csv          tariff / station policy reference data (also loaded into Postgres)
+producer/                   simulator.py (sessions, dupes/late/invalid), wal.py (WAL + S3
+                            archiver), producer.py (main), reconcile.py (split-write repair)
+streaming/speed_layer.py    speed layer
+batch/batch_job.py          batch layer;  batch/scheduler.py: hourly runner
+serving/init/*.sql          schema, tariff seed, batch/speed/merged views
+grafana/                    provisioned datasource + exported dashboard JSON
+spark/Dockerfile            Spark 4.0.1 image with Kafka connector baked in
+tests/                      unit tests (host) + Spark parity tests (in the Spark image)
+docs/                       architecture diagram, technology decision record
+```
+
+---
+
+## 1. Deploy on a fresh EC2 instance (AWS Academy Learner Lab)
+
+### Option A: one command (what we use)
+
+With valid sandbox credentials in `~/.aws/credentials` (`run-aws.cmd --clipboard --no-run` writes them):
+
+```bash
+pip install -r requirements.txt
+python deploy/ec2_deploy.py                 # key pair, SG (your IP /32), instance, Elastic IP, code, compose up
+python deploy/ec2_deploy.py --status        # containers + Grafana URL
+python deploy/ec2_deploy.py --code-only     # redeploy after code changes
+```
+
+The script is idempotent (it finds everything again by its `Name` tag). The instance uses `LabInstanceProfile`, so no AWS keys are stored on the host. The remote `.env` is generated once with random passwords, and a copy is saved at `~/.chargepulse/ec2.env`.
+
+> **Instance size.** The guideline recommends a t3.xlarge. Our *AWS Academy Data Engineering* sandbox has an explicit `Ec2RestrictInstanceTypes` deny for anything bigger than `*.small`, so we run on a **t3.small (2 vCPU, 2 GB) with 4 GB swap**. The deploy script sets the small memory profile (Kafka heap 384 MB, Spark drivers 640 MB). In a Learner Lab that allows it, pass `--instance-type t3.xlarge` and the default memory sizes are used.
+
+### Option B: by hand
+
+1. **Launch the instance**: Ubuntu Server 24.04 LTS, **t3.xlarge**, **30 GB or more gp3** (we use 50 GB). Choose *IAM instance profile* → **`LabInstanceProfile`**, which gives the containers S3 access without keys.
+2. **Security Group (inbound)**: only **22** (SSH) and **3000** (Grafana), both with source **`<your public IP>/32`**, never `0.0.0.0/0`. Do not open 9092, 5432, 4040 or 9000.
+3. **Elastic IP** (recommended): the public IP changes on every stop/start. Without an Elastic IP, update the Security Group after each restart.
+4. Allow containers to use the instance profile (IMDSv2 needs 2 network hops from inside Docker). From your laptop or CloudShell:
+   ```bash
+   aws ec2 modify-instance-metadata-options --instance-id <i-…> \
+       --http-put-response-hop-limit 2 --http-endpoint enabled
+   ```
+5. **Install Docker** on the instance:
+   ```bash
+   sudo apt-get update && sudo apt-get install -y ca-certificates curl git
+   curl -fsSL https://get.docker.com | sudo sh
+   sudo usermod -aG docker $USER && newgrp docker
+   docker compose version          # Compose v2.20+ required
+   ```
+6. **Clone and configure**:
+   ```bash
+   git clone <repo-url> ChargePulse && cd ChargePulse
+   cp .env.example .env
+   nano .env    # set POSTGRES_PASSWORD, GRAFANA_ADMIN_PASSWORD, and a globally unique S3_BUCKET
+   ```
+   With `LabInstanceProfile` attached, leave `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` and `AWS_SESSION_TOKEN` empty. Without it, paste the three values from Learner Lab → *AWS Details* (they expire when the lab session ends). `S3_CREATE_BUCKET=true` makes the producer create the bucket on first start.
+7. **Start everything**:
+   ```bash
+   docker compose up -d --build
+   docker compose ps
+   ```
+   The first build takes about 5 minutes. After that, `kafka-init` shows `Exited (0)` and every other service shows `Up` / `healthy`.
+8. Open **http://\<elastic-ip\>:3000** and log in with `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`. The *ChargePulse - Lambda Serving Layer* dashboard is the home page.
+9. To reach internal UIs, use an SSH tunnel:
+   ```bash
+   ssh -i key.pem -L 4040:localhost:4040 -L 5432:localhost:5432 ubuntu@<elastic-ip>
+   ```
+10. **Stop the instance when you are not working** (`docker compose stop` first). Volumes survive a stop/start. Kafka retention, stream checkpoints and the S3 fingerprints make the pipeline resume where it left off.
+
+### Local development (no AWS)
+
+Set these in `.env` to run an S3-compatible store inside Compose:
+
+```
+COMPOSE_PROFILES=local-s3
+S3_ENDPOINT_URL=http://minio:9000
+AWS_ACCESS_KEY_ID=chargepulse-local
+AWS_SECRET_ACCESS_KEY=<8+ characters>
+S3_CREATE_BUCKET=true
+```
+
+Then run `docker compose up -d --build`. The code paths are identical; only the S3 endpoint differs.
+
+---
+
+## 2. Configuration (`.env`)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `EVENT_RATE` | 50 | Producer events/second |
+| `DUPLICATE_RATE` | 0.02 | Share of records that re-send an already-sent event (same `event_id`) |
+| `LATE_RATE`, `LATE_MIN_SECONDS`, `LATE_MAX_SECONDS` | 0.03, 30, 240 | Share of events whose `event_ts` is pushed into the past (late / out of order) |
+| `INVALID_RATE` | 0.002 | Share of malformed events (sent to `dead-letter/`) |
+| `SETTLEMENT_MISMATCH_RATE` | 0.05 | Share of settlement reports that disagree with the meter |
+| `SPEED_WATERMARK` | `2 minutes` | Speed-layer lateness allowance |
+| `SPEED_TRIGGER` | `10 seconds` | Micro-batch interval |
+| `BATCH_INTERVAL_SECONDS` | 3600 | Batch schedule (hourly, runs at hh:00 + grace) |
+| `BATCH_GRACE_SECONDS` | 300 | How long an hour waits for late events before batch closes it |
+| `BATCH_LOOKBACK_HOURS` | 48 | Completed hours re-checked for changed raw data |
+
+After editing `.env`, apply the change with `docker compose up -d` (it recreates only the affected services).
+
+---
+
+## 3. Operating and demonstrating
+
+```bash
+# status, logs
+docker compose ps
+docker compose logs -f producer          # rate, Kafka acks, S3 uploads, dupes/late/invalid counts
+docker compose logs -f speed-layer       # "[speed] batch N: upserted … windows"
+docker compose logs -f batch-scheduler   # "[batch] hour … done: raw=… unique=… duplicates_removed=…"
+
+# Kafka: topics and their 7-day retention
+docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --describe
+docker compose exec kafka /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:29092 \
+    --describe --entity-type topics --entity-name charge-events
+
+# serving layer
+docker compose exec postgres psql -U chargepulse -d chargepulse -c "SELECT * FROM serving_boundary;"
+docker compose exec postgres psql -U chargepulse -d chargepulse -c \
+  "SELECT source, count(*), min(window_start), max(window_start) FROM merged_view GROUP BY 1;"
+docker compose exec postgres psql -U chargepulse -d chargepulse -c "SELECT * FROM layer_comparison;"
+
+# batch layer: run now (scheduled mode), or force-recompute one hour (idempotent)
+docker compose exec batch-scheduler /opt/spark/bin/spark-submit --master 'local[2]' \
+    /opt/chargepulse/batch/batch_job.py
+docker compose exec batch-scheduler /opt/spark/bin/spark-submit --master 'local[2]' \
+    /opt/chargepulse/batch/batch_job.py --hour 2026-11-26T17
+
+# emit late events on demand: 600 events 40-55 min late (lands in an already-batched hour)
+docker compose exec producer python producer.py --instance late-burst --count 600 --rate 100 \
+    --duplicate-rate 0 --invalid-rate 0 --late-rate 1 --late-min-seconds 2400 --late-max-seconds 3300
+
+# emit a burst with many duplicates
+docker compose exec producer python producer.py --instance dup-burst --count 1000 --rate 100 \
+    --duplicate-rate 0.5 --late-rate 0
+
+# split-write reconciliation for one hour (report; add --apply to repair)
+docker compose exec producer python reconcile.py --hour 2026-11-26T17
+
+# tests: host unit tests, then Spark parity tests inside the Spark image
+pip install -r requirements.txt && pytest -q
+docker compose run --rm --no-deps batch-scheduler python3 -m pytest -q tests/test_contract.py tests/test_spark_transforms.py
+
+# Grafana dashboard export (the provisioned JSON in grafana/dashboards is the source)
+curl -s -u admin:$GRAFANA_ADMIN_PASSWORD localhost:3000/api/dashboards/uid/chargepulse-lambda
+```
+
+### Demo script (≤ 15 min)
+
+Start the stack **at least 70 minutes before recording** so that one full hour has been batch-processed.
+
+1. **Stack starting**: `docker compose down` (volumes kept), then `docker compose up -d`, then `docker compose ps`. Show `kafka-init` exiting 0 and the topic `--describe` with `retention.ms=604800000`.
+2. **Data flowing**: show producer logs (~50 ev/s, S3 objects per minute, dupes/late/invalid counts), the S3 `raw/events/dt=…/hr=…/` listing (`aws s3 ls s3://$S3_BUCKET/raw/events/ --recursive | tail`), and speed-layer logs.
+3. **Dashboard updating**: Grafana auto-refreshes every 10 s. Point out throughput, energy per station, and *Merged view by source*: green = batch before the boundary, yellow = speed after it.
+4. **Lambda distinguishing feature, batch reconciling speed**:
+   - Show the boundary (`SELECT * FROM serving_boundary`) and the last speed hour in `layer_comparison`.
+   - Either wait for the hh:05 run or trigger the batch run (command above). Then show in Grafana that the previous hour flipped from *speed* to *batch*. The *Batch reconciliation of the speed layer* table shows `speed_events` vs `batch_events` and the energy correction (late events beyond the watermark, duplicates the speed layer could not see).
+   - **Late data:** run the `late-burst` command, then run the batch again. The log says `hour … (raw data changed)`, `run_count` goes up, and `batch_events` grows by exactly the burst size.
+   - **Idempotency:** run `--hour <same hour>` twice. Row counts and totals don't change and only `run_count` increments.
+5. **Failure drills** (optional): `docker compose stop kafka` for 1 minute. The producer keeps writing the WAL and S3 and queues the Kafka sends. Then `docker compose start kafka`, and the retry queue drains (`retry_queue=0` in the logs). Finish with `reconcile.py` to show both sides match.
+
+---
+
+## 4. Design: Lambda checklist
+
+### 4.1 Event contract
+
+Every charging event carries: **`event_id`** (UUID, the dedup key), **`event_ts`** (event time, when the meter reading happened), **`ingest_ts`** (when the producer emitted it), entity keys **`station_id`** / `session_id` / `connector_id`, numeric measures **`energy_delta_kwh`** and **`power_kw`**, plus `session_status` and `schema_version`. Settlement reports carry `report_id`, `session_id`, `billed_energy_kwh`, `billed_amount`, `settlement_status`, `session_end_ts` and `reported_at`. The single definition is in [`chargepulse_common/contract.py`](chargepulse_common/contract.py). It produces the Arrow schema (producer → S3 Parquet), the Spark JSON schema (Kafka) and the Spark Parquet schema (S3 → batch).
+
+The producer can emit **duplicates** (`DUPLICATE_RATE`), **late / out-of-order events** (`LATE_RATE`, `LATE_MIN/MAX_SECONDS`) and **invalid records** (`INVALID_RATE`) on demand. Each can be set through env vars or per-run CLI flags.
+
+### 4.2 Split-write fault tolerance
+
+Write order for every record in [`producer/producer.py`](producer/producer.py) and [`producer/wal.py`](producer/wal.py):
+
+1. **Local write-ahead log**: append to a per-minute JSONL segment on the `producer-wal` volume, `fsync`'d every second.
+2. **Kafka**: `send(acks=all)`, asynchronous with callbacks.
+3. **S3**: a background thread turns every *closed* segment into Parquet, grouped by event-time hour, and `PUT`s it to `raw/events/dt=…/hr=…/<instance>-<segment>.parquet`. The segment is deleted only after every PUT succeeded.
+
+| Failure | What happens | Detection | Reconciliation |
+|---------|--------------|-----------|----------------|
+| **S3 fails, Kafka succeeds** | The speed layer is unaffected. Segments stay on disk and the archiver retries with exponential backoff (max 60 s). | Producer log `S3 upload failed … retry`; segment count in the WAL volume. | Automatic when S3 is back. Keys are deterministic, so a partly uploaded segment is simply overwritten. Batch hours wait (grace + fingerprint), and any hour whose raw data arrives later is recomputed. |
+| **Kafka fails, S3 succeeds** | The record is already durable in the WAL and goes to S3 as normal. Short outages are absorbed by the Kafka client's send buffer: a 45 s broker stop in testing lost nothing and the producer stayed at 50 ev/s. If a send ultimately fails, it goes to an in-memory retry queue, retried every second, and its `event_id` is appended to `kafka_failed.log`. | `kafka_failed` / `retry_queue` counters in the producer log; the ledger file. | Automatic retry. If the producer restarts with a non-empty queue, `reconcile.py --hour H --apply` compares S3 and Kafka for that hour and re-publishes the missing events. The speed view is only an estimate anyway: the batch run for the hour is computed from S3 and becomes authoritative. |
+| **Producer crashes** | Unclosed segments are renamed and uploaded on restart. Records sent to Kafka but not yet fsync'd (< 1 s) can be missing from S3. | `reconcile.py` reports `missing_in_s3`. | `reconcile.py --apply` writes them to a `repair-*.parquet` in the right hour. The batch layer's `event_id` dedup makes repairs safe to apply twice. |
+| **Kafka or S3 receives the same event twice** (retries, repairs, generator duplicates) | | | Speed layer: `dropDuplicatesWithinWatermark(event_id)`. Batch layer: `dropDuplicates(event_id)` per hour. |
+
+So no event can exist only in Kafka (the WAL is written first), and every S3 or Kafka gap is detectable per hour and repairable.
+
+### 4.3 Consistency between batch and speed logic
+
+- **One schema contract:** [`contract.py`](chargepulse_common/contract.py) defines the fields and the validation rules. [`transforms.py`](chargepulse_common/transforms.py) derives the Spark schemas from it and implements the same rules as a Spark `Column` (`valid_event_condition`).
+- **One transformation module:** both layers call the same functions: `normalize_events → valid_event_condition → enrich_with_tariffs → aggregate_station_minute` (1-minute tumbling event-time windows, same columns, same tariff join and cost formula). Only the dedup scope differs: within the watermark for the speed layer, the whole hour for the batch layer.
+- **One tariff source:** `config/tariffs.csv` is read by the producer (settlement amounts), both Spark jobs (estimated cost) and Postgres (alert thresholds).
+- **Tested:** `tests/test_spark_transforms.py` runs a *real streaming query* and the batch pipeline over the same records (with duplicates and invalid events) and asserts identical aggregates. It also asserts that the Python and Spark validation rules accept exactly the same records.
+
+The layers differ *by design* only for events later than the 2-minute watermark, which the speed layer drops and the batch layer includes. `layer_comparison` shows that correction per hour.
+
+### 4.4 Serving: merge without double counting
+
+The boundary is the end of the last hour the batch layer completed. It is written **in the same transaction** as that hour's `batch_view` rows ([`serving/init/03_views.sql`](serving/init/03_views.sql)):
+
+```sql
+CREATE VIEW serving_boundary AS
+SELECT COALESCE(MAX(hour_end), '-infinity'::timestamptz) AS batch_boundary,
+       MAX(finished_at)                                  AS last_batch_finished_at
+FROM batch_runs;
+
+CREATE VIEW merged_view AS
+SELECT b.window_start, b.window_end, b.station_id, b.event_count, b.session_count,
+       b.total_energy_kwh, b.est_energy_cost, b.avg_power_kw, b.max_power_kw,
+       'batch' AS source
+FROM batch_view b CROSS JOIN serving_boundary sb
+WHERE b.window_start <  sb.batch_boundary          -- batch: authoritative up to the boundary
+UNION ALL
+SELECT s.window_start, s.window_end, s.station_id, s.event_count, s.session_count,
+       s.total_energy_kwh, s.est_energy_cost, s.avg_power_kw, s.max_power_kw,
+       'speed' AS source
+FROM speed_view s CROSS JOIN serving_boundary sb
+WHERE s.window_start >= sb.batch_boundary;         -- speed: only the interval since then
+```
+
+Why this cannot double count:
+
+1. The two predicates (`< boundary` and `>= boundary`) are complementary, so every `(window_start, station_id)` comes from exactly one layer.
+2. The boundary is always on the hour and windows are 1 minute long, so no window falls on both sides.
+3. Each table has primary key `(window_start, station_id)`. The speed layer upserts, and the batch layer deletes and re-inserts a whole hour. Neither table can hold two rows for the same window.
+4. The boundary moves forward only when `batch_runs` gets a new hour, in the same transaction as that hour's rows. A query sees either the old boundary with speed rows, or the new boundary with batch rows, never a half-written hour.
+5. Hours are processed in order and the job stops at the first failure, so the boundary never jumps past an hour that has not been processed.
+
+Example: boundary = 17:00. Grafana shows batch rows for 16:59 and earlier and speed rows from 17:00 onwards. At 18:05 the batch job commits hour 17 and `batch_runs.hour_end = 18:00`. The next refresh shows 17:00–17:59 from batch, and the speed rows for that hour are no longer read (they stay for `layer_comparison`, then get pruned after 48 h).
+
+---
+
+## 5. Security
+
+- Only 22 and 3000 are open in the Security Group, and only to the team's /32. Kafka, Postgres, the Spark UI and the local S3 store are bound to `127.0.0.1`; use an SSH tunnel.
+- No credentials in code or in git: everything comes from `.env` (git-ignored; `.env.example` holds placeholders) or the EC2 instance profile.
+- Grafana: admin password from `.env`, sign-up and anonymous access disabled, provisioned dashboards are read-only.
+- Every image and Python dependency is pinned to an exact version.
+
+## 6. Known limitations
+
+- Single broker and single Spark driver, so there is no high availability. That's acceptable for the one-instance budget.
+- `session_count` uses `approx_count_distinct` in both layers (an exact distinct count isn't supported in streaming aggregations). At these cardinalities it is exact in practice.
+- Session reconciliation reads the settlement hour plus the previous hour of events. Sessions longer than about an hour would need a wider read.
