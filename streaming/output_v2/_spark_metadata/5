@@ -1,6 +1,0 @@
-v1
-{"path":"file:///opt/chargepulse/streaming/output_v2/part-00000-c62a15cb-e15f-4166-b83f-b6233c8aefe3-c000.snappy.parquet","size":1016,"isDir":false,"modificationTime":1795631086813,"blockReplication":1,"blockSize":33554432,"action":"add"}
-{"path":"file:///opt/chargepulse/streaming/output_v2/part-00009-2a4055f1-98ec-48e5-a21f-2d5d0ae16ed5-c000.snappy.parquet","size":2412,"isDir":false,"modificationTime":1795631086815,"blockReplication":1,"blockSize":33554432,"action":"add"}
-{"path":"file:///opt/chargepulse/streaming/output_v2/part-00046-6860e2c7-e97b-41ef-8f05-4c2413ae9560-c000.snappy.parquet","size":2412,"isDir":false,"modificationTime":1795631087630,"blockReplication":1,"blockSize":33554432,"action":"add"}
-{"path":"file:///opt/chargepulse/streaming/output_v2/part-00151-b5522d24-ffba-402c-adbb-4431699ad825-c000.snappy.parquet","size":2409,"isDir":false,"modificationTime":1795631090056,"blockReplication":1,"blockSize":33554432,"action":"add"}
-{"path":"file:///opt/chargepulse/streaming/output_v2/part-00195-687e6621-2814-41f5-b2d7-16f927d7c640-c000.snappy.parquet","size":2411,"isDir":false,"modificationTime":1795631090934,"blockReplication":1,"blockSize":33554432,"action":"add"}

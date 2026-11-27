@@ -1,9 +1,8 @@
-boto3
-kafka-python
-pyspark
-psycopg[binary]
-python-dotenv
-pydantic
-pandas
-pyarrow
-pytest
+# Local development / unit tests (pip install -r requirements.txt).
+# Runtime images pin their own dependencies:
+#   producer/requirements.txt, spark/requirements.txt
+boto3==1.44.9
+kafka-python==3.0.13
+pyarrow==26.0.1
+psycopg[binary]==3.3.9
+pytest==9.2.0

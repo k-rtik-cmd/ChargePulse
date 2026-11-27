@@ -28,3 +28,13 @@ Thumbs.db
 
 # Pytest
 .pytest_cache/
+
+# Spark local runs / prototype outputs (state lives in Docker volumes now)
+streaming/checkpoints*/
+streaming/output*/
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Local backups
+*.backup

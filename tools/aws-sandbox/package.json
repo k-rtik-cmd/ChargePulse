@@ -1,0 +1,10 @@
+{
+  "name": "chargepulse-aws-sandbox",
+  "private": true,
+  "type": "module",
+  "description": "Fetch fresh AWS Academy sandbox credentials, write them into ChargePulse .env, and start the stack.",
+  "dependencies": {
+    "@aws-sdk/client-sts": "^3.600.0",
+    "playwright-core": "^1.48.0"
+  }
+}

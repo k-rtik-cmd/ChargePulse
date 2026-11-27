@@ -1,0 +1,3 @@
+boto3==1.44.9
+psycopg[binary]==3.3.9
+pytest==9.2.0

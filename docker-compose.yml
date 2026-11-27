@@ -1,94 +1,226 @@
+# ChargePulse - Lambda architecture on a single host (one Docker Compose project).
+#
+#   cp .env.example .env    # then edit it
+#   docker compose up -d --build
+#
+# Only Grafana (3000) is published on all interfaces. Every other port is
+# bound to 127.0.0.1, so you reach it through an SSH tunnel.
+
+name: chargepulse
+
+x-spark-common: &spark-common
+  build:
+    context: .
+    dockerfile: spark/Dockerfile
+  image: chargepulse/spark:1.0.0
+  environment: &spark-env
+    TZ: UTC
+    KAFKA_BOOTSTRAP: kafka:29092
+    POSTGRES_HOST: postgres
+    POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+    POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
 
 services:
+  # ------------------------------------------------------------ message tier
   kafka:
     image: apache/kafka:4.1.1
-    container_name: chargepulse-kafka
     hostname: kafka
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"   # host listener for debugging only
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: HOST://:9092,INTERNAL://:29092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: HOST://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENERS: INTERNAL://:29092,HOST://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,HOST:PLAINTEXT,INTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_NUM_PARTITIONS: 3
-      HOME: /tmp
-      SPARK_LOCAL_DIRS: /tmp/spark-local
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_HEAP_OPTS: ${KAFKA_HEAP_OPTS:--Xms512m -Xmx1g}
     volumes:
-      - kafka_data:/var/lib/kafka/data
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
     restart: unless-stopped
 
-  spark:
-    image: apache/spark:4.0.1
-    container_name: chargepulse-spark
-    hostname: spark
+  kafka-init:   # creates topics with an explicit 7-day retention, then exits
+    image: apache/kafka:4.1.1
     depends_on:
-      - kafka
-    volumes:
-      - ./streaming:/opt/chargepulse/streaming
-    working_dir: /opt/chargepulse
-    command: >
-      /opt/spark/bin/spark-submit
-      --master local[*]
-      --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.1
-      --conf
-      spark.jars.ivy=/tmp/.ivy2
-      /opt/chargepulse/streaming/speed_layer.py
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        for topic in charge-events charge-settlements; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --create --if-not-exists \
+            --topic "$$topic" --partitions 3 --replication-factor 1 \
+            --config retention.ms=604800000 --config retention.bytes=-1
+          /opt/kafka/bin/kafka-configs.sh --bootstrap-server kafka:29092 --alter \
+            --entity-type topics --entity-name "$$topic" \
+            --add-config retention.ms=604800000,retention.bytes=-1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:29092 --describe
 
-    environment:
-      KAFKA_BOOTSTRAP: kafka:29092
-    restart: unless-stopped
-  postgres:
-    image: postgres:16
-    container_name: chargepulse-postgres
-
-    environment:
-      POSTGRES_DB: chargepulse
-      POSTGRES_USER: chargepulse
-      POSTGRES_PASSWORD: chargepulse_dev
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./serving:/docker-entrypoint-initdb.d
-    restart: unless-stopped
-
-  grafana:
-    image: grafana/grafana:11.5.2
-    container_name: chargepulse-grafana
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    depends_on:
-      - postgres
-    restart: unless-stopped
-
+  # ------------------------------------------- local S3 (only without AWS S3)
   minio:
-    image: pgsty/silo:latest
-    container_name: chargepulse-minio
+    profiles: ["local-s3"]
+    image: pgsty/silo:RELEASE.2026-11-12T00-00-00Z
     hostname: minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: chargepulseadmin
-      MINIO_ROOT_PASSWORD: ChargePulseLocal2026!
+      MINIO_ROOT_USER: ${AWS_ACCESS_KEY_ID:-}
+      MINIO_ROOT_PASSWORD: ${AWS_SECRET_ACCESS_KEY:-}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
     volumes:
-      - minio_data:/data
+      - s3-data:/data
+    restart: unless-stopped
+
+  # ------------------------------------------------------------- generator
+  producer:
+    build:
+      context: .
+      dockerfile: producer/Dockerfile
+    image: chargepulse/producer:1.0.0
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+        required: false
+    environment:
+      TZ: UTC
+      KAFKA_BOOTSTRAP: kafka:29092
+      S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET in .env}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      S3_CREATE_BUCKET: ${S3_CREATE_BUCKET:-false}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      EVENT_RATE: ${EVENT_RATE:-50}
+      DUPLICATE_RATE: ${DUPLICATE_RATE:-0.02}
+      LATE_RATE: ${LATE_RATE:-0.03}
+      LATE_MIN_SECONDS: ${LATE_MIN_SECONDS:-30}
+      LATE_MAX_SECONDS: ${LATE_MAX_SECONDS:-240}
+      INVALID_RATE: ${INVALID_RATE:-0.002}
+      SETTLEMENT_MISMATCH_RATE: ${SETTLEMENT_MISMATCH_RATE:-0.05}
+    volumes:
+      - producer-wal:/var/lib/chargepulse/wal
+    restart: unless-stopped
+
+  # ------------------------------------------------------- processing tier
+  speed-layer:
+    <<: *spark-common
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *spark-env
+      SPEED_WATERMARK: ${SPEED_WATERMARK:-2 minutes}
+      SPEED_TRIGGER: ${SPEED_TRIGGER:-10 seconds}
+    command:
+      - /opt/spark/bin/spark-submit
+      - --master
+      - local[2]
+      - --driver-memory
+      - ${SPEED_DRIVER_MEMORY:-1g}
+      - /opt/chargepulse/streaming/speed_layer.py
+    ports:
+      - "127.0.0.1:4040:4040"   # Spark UI (SSH tunnel)
+    volumes:
+      - spark-checkpoints:/var/lib/chargepulse/checkpoints
+    restart: unless-stopped
+
+  batch-scheduler:
+    <<: *spark-common
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+        required: false
+    environment:
+      <<: *spark-env
+      S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET in .env}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
+      BATCH_INTERVAL_SECONDS: ${BATCH_INTERVAL_SECONDS:-3600}
+      BATCH_GRACE_SECONDS: ${BATCH_GRACE_SECONDS:-300}
+      BATCH_LOOKBACK_HOURS: ${BATCH_LOOKBACK_HOURS:-48}
+      LATE_THRESHOLD_SECONDS: ${LATE_THRESHOLD_SECONDS:-120}
+      BATCH_DRIVER_MEMORY: ${BATCH_DRIVER_MEMORY:-1g}
+    command: ["python3", "/opt/chargepulse/batch/scheduler.py"]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------- serving tier
+  postgres:
+    image: postgres:16.16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      TZ: UTC
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+      - ./serving/init:/docker-entrypoint-initdb.d:ro
+      - ./config/tariffs.csv:/seed/tariffs.csv:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # ---------------------------------------------------- visualisation tier
+  grafana:
+    image: grafana/grafana:11.5.2
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"             # the only port opened in the Security Group (with SSH)
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 5s
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/chargepulse.json
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
     restart: unless-stopped
 
 volumes:
-  kafka_data:
-  postgres_data:
-  grafana_data:
-  minio_data:
+  kafka-data:
+  s3-data:
+  producer-wal:
+  spark-checkpoints:
+  pg-data:
+  grafana-data:
