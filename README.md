@@ -34,7 +34,7 @@ flowchart LR
 | **Serving layer** | PostgreSQL | Stores the results of both layers and combines them into one view. |
 | **Dashboard** | Grafana | Shows live charts from PostgreSQL. |
 
-Everything runs in **Docker** containers on one **AWS EC2** machine.
+Everything runs in **Docker** containers on one **EC2** machine.
 
 ---
 
@@ -74,7 +74,7 @@ chargepulse_common/    shared code used by both layers
 serving/               PostgreSQL tables and views
 grafana/               dashboard setup
 config/tariffs.csv     electricity prices used for cost calculation
-deploy/                script to deploy on AWS EC2
+deploy/                script to deploy on EC2
 tests/                 automated tests
 docs/                  architecture, technology choices, reflection, full details
 docker-compose.yml     starts all services together
