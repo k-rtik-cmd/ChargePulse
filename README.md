@@ -17,7 +17,7 @@ Team: **Laksh Sharma, Kartik Singh** (CS1243, Big Data Analytics with Hadoop and
 flowchart LR
     P[Producer<br/>fake charging data] --> K[[Kafka]]
     P --> S3[(S3 storage)]
-    K --> SL[Speed layer<br/>every minute]
+    K --> SL[Speed layer<br/>every 10 seconds]
     S3 --> BL[Batch layer<br/>every hour]
     SL --> PG[(PostgreSQL)]
     BL --> PG
